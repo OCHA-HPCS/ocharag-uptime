@@ -1,0 +1,40 @@
+# Outside probe for rag.hpcs.tools. A failed scheduled run emails the repository owner.
+# This repo is public only so its Actions minutes are free; it holds no secrets.
+name: probe
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+permissions: {}
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: ops-status is fresh and ok
+        run: |
+          set -eu
+          body=$(curl -4 -sS --fail --max-time 20 https://rag.hpcs.tools/ops-status)
+          echo "$body"
+          python3 - "$body" <<'PY'
+          import json, sys, datetime as dt
+          s = json.loads(sys.argv[1])
+          age = (dt.datetime.now(dt.timezone.utc)
+                 - dt.datetime.fromisoformat(s["generated_at"].replace("Z", "+00:00"))).total_seconds()
+          problems = []
+          # Staleness catches what the in-cluster job cannot report: node pool lost, CronJob
+          # not scheduled. 20 min = four missed 5-minute runs.
+          if age > 20 * 60:
+              problems.append(f"status is stale: {int(age // 60)} min old")
+          if not s.get("ok"):
+              problems.append("failing: " + ", ".join(s.get("failing") or ["(none listed)"]))
+          if not s.get("checks"):
+              problems.append("no checks reported")
+          if problems:
+              print("::error::" + "; ".join(problems)); sys.exit(1)
+          print(f"ok, {len(s['checks'])} checks, {int(age)} s old")
+          PY
+      - name: backend health answers
+        run: curl -4 -sS --fail --max-time 20 https://rag.hpcs.tools/health -o /dev/null -w '%{http_code}\n'
+      - name: sign-in page answers
+        run: curl -4 -sS --fail --max-time 20 https://rag.hpcs.tools/login -o /dev/null -w '%{http_code}\n'
